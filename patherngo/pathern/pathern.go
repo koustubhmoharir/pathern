@@ -41,12 +41,208 @@ const (
 	pTypStarStar
 )
 
+type baseNode struct {
+	parent pNode
+	index  int
+}
+
+func (n *baseNode) Position() (pNode, int) {
+	return n.parent, n.index
+}
+
 type pNode interface {
 	Typ() int
+	Link(parent pNode, index int)
+	Child(index int) pNode
+	Position() (pNode, int)
+
 	matchSegmentStatic(iseg string, nameValues map[string]string) int
 }
 
+type matchSegState struct {
+	iseg        string
+	remSeg      string
+	left        int
+	right       int
+	nextFwd     pNode
+	top         pNode
+	altStackFwd []int
+	altStackBwd []int
+}
+
+func (ms *matchSegState) nextNode(node pNode, step int, success bool) pNode {
+	if !success {
+		var altStack []int
+		var size int
+		if step == 1 {
+			altStack = ms.altStackFwd
+			size = ms.left
+		} else {
+			altStack = ms.altStackBwd
+			size = ms.right
+		}
+		altStackLen := len(altStack)
+		if altStackLen == 0 || altStack[altStackLen-1] != size {
+			return nil
+		}
+		for {
+			parent, index := node.Position()
+			if parent.Typ() == pTypAltOuter {
+				next := parent.Child(index + step)
+				if next != nil {
+					return next
+				}
+				return nil
+			}
+			node = parent
+		}
+	}
+	popAltStack := func(p pNode) {
+		if p.Typ() == pTypAltOuter {
+			if step == 1 {
+				ms.altStackFwd = ms.altStackFwd[:len(ms.altStackFwd)-1]
+			} else if step == -1 {
+				ms.altStackBwd = ms.altStackBwd[:len(ms.altStackBwd)-1]
+			}
+		}
+	}
+	for {
+		parent, index := node.Position()
+		next := parent.Child(index + step)
+		if next != nil {
+			return next
+		}
+		popAltStack(parent)
+		if parent == ms.top {
+			return nil
+		}
+		if parent.Typ() == pTypAltInner {
+			parent, _ = parent.Position()
+			popAltStack(parent)
+			if parent == ms.top {
+				return nil
+			}
+		}
+		node = parent
+	}
+}
+
+func (ms *matchSegState) match() bool {
+	ms.remSeg = ms.iseg
+	ms.nextFwd = ms.top.(*groupNode).nodes[0]
+	for {
+		current := ms.nextFwd
+		m := ms.stepForward()
+		if m < 0 {
+			return false
+		}
+		if m == 0 {
+			break
+		}
+		if current == ms.nextFwd {
+			if ms.left == len(ms.iseg) {
+				return true
+			}
+			if ms.top.Typ() == pTypNegated {
+				return hasNextInSegment(ms.top, 1)
+			}
+			// standalone successful negation
+			return ms.left == 0
+		}
+	}
+
+	return false
+}
+
+func hasNextInSegment(n pNode, step int) bool {
+	for {
+		if n.Typ() == pTypDirSegment || n.Typ() == pTypFileSegment {
+			return false
+		}
+		parent, index := n.Position()
+		if parent.Typ() == pTypAltOuter {
+			parent, _ = parent.Position()
+		} else {
+			next := parent.Child(index + step)
+			if next != nil {
+				return true
+			}
+		}
+		n = parent
+	}
+}
+
+func (ms *matchSegState) stepForward() int {
+	typ := ms.nextFwd.Typ()
+	switch n := ms.nextFwd.(type) {
+	case *groupNode:
+		if typ == pTypAltInner {
+			ms.nextFwd = n.nodes[0]
+			return 1
+		}
+		if typ == pTypExplicit {
+			ms.nextFwd = n.nodes[0]
+			return 1
+		}
+		if typ == pTypNegated {
+			nms := *ms
+			nms.nextFwd = n.nodes[0]
+			nms.top = ms.nextFwd
+			nms.altStackFwd = nil
+			if nms.match() {
+				next := ms.nextNode(ms.nextFwd, 1, false)
+				if next == nil {
+					return -1
+				}
+				ms.nextFwd = next
+				return 1
+			} else {
+				next := ms.nextNode(ms.nextFwd, 1, true)
+				if next != nil {
+					ms.nextFwd = next
+				}
+				return 1
+			}
+		}
+		if typ == pTypAltOuter {
+			ms.altStackFwd = append(ms.altStackFwd, ms.left)
+			ms.nextFwd = n.nodes[0]
+			return 1
+		}
+	case *literalNode:
+		num := 0
+		if n.caseSensitive {
+			if strings.HasPrefix(ms.remSeg, n.text) {
+				num = len(n.text)
+			}
+		} else {
+			num = hasPrefixFold(ms.remSeg, n.text)
+		}
+		if num > 0 {
+			ms.left += num
+			ms.remSeg = ms.remSeg[num:]
+			next := ms.nextNode(ms.nextFwd, 1, true)
+			if next != nil {
+				ms.nextFwd = next
+			}
+			return 1
+		}
+		next := ms.nextNode(ms.nextFwd, 1, false)
+		if next == nil {
+			return -1
+		}
+		ms.nextFwd = next
+		return 1
+	case *starNode:
+		return 0
+	case *starStarNode:
+		return 0
+	}
+	return -1
+}
+
 type groupNode struct {
+	baseNode
 	typ      int
 	name     string
 	optional bool
@@ -55,6 +251,47 @@ type groupNode struct {
 
 func (n *groupNode) Typ() int {
 	return n.typ
+}
+
+func (n *groupNode) Link(parent pNode, index int) {
+	n.parent = parent
+	n.index = index
+	for i, cn := range n.nodes {
+		cn.Link(n, i)
+	}
+}
+
+func (n *groupNode) Child(index int) pNode {
+	if index >= 0 && index < len(n.nodes) {
+		return n.nodes[index]
+	}
+	return nil
+}
+
+func (n *groupNode) Match2(path string) (map[string]string, bool) {
+	nameValues := make(map[string]string)
+	isegs := splitPath(path)
+	start := 0
+	for {
+		if start == len(isegs) {
+			if start == len(n.nodes) {
+				return nameValues, true
+			}
+			// check if all remaining nodes can match nothing
+			return nil, false
+		}
+		if start == len(n.nodes) {
+			return nil, false
+		}
+		ms := matchSegState{iseg: isegs[start], top: n.nodes[start]}
+		m := ms.match()
+		if !m {
+			return nil, false
+		}
+		start++
+	}
+
+	return nil, false
 }
 
 func (n *groupNode) Match(path string) (map[string]string, bool) {
@@ -134,6 +371,7 @@ func (n *groupNode) matchSegmentStatic(iseg string, nameValues map[string]string
 }
 
 type literalNode struct {
+	baseNode
 	typ           int
 	text          string
 	optional      bool
@@ -142,6 +380,15 @@ type literalNode struct {
 
 func (n *literalNode) Typ() int {
 	return n.typ
+}
+
+func (n *literalNode) Link(parent pNode, index int) {
+	n.parent = parent
+	n.index = index
+}
+
+func (n *literalNode) Child(index int) pNode {
+	return nil
 }
 
 func (n *literalNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
@@ -171,6 +418,7 @@ func (n *literalNode) matchSegmentStatic(iseg string, nameValues map[string]stri
 }
 
 type starNode struct {
+	baseNode
 	typ int
 }
 
@@ -178,17 +426,42 @@ func (n *starNode) Typ() int {
 	return n.typ
 }
 
+func (n *starNode) Link(parent pNode, index int) {
+	n.parent = parent
+	n.index = index
+}
+
+func (n *starNode) Child(index int) pNode {
+	return nil
+}
+
 func (n *starNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
 	return len(iseg)
 }
 
 type starStarNode struct {
+	baseNode
 	typ     int
 	negated *groupNode
 }
 
 func (n *starStarNode) Typ() int {
 	return n.typ
+}
+
+func (n *starStarNode) Link(parent pNode, index int) {
+	n.parent = parent
+	n.index = index
+	if n.negated != nil {
+		n.negated.Link(n, 0)
+	}
+}
+
+func (n *starStarNode) Child(index int) pNode {
+	if index == 0 && n.negated != nil {
+		return n.negated
+	}
+	return nil
 }
 
 func (n *starStarNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
@@ -437,6 +710,7 @@ func New(text string) *groupNode {
 	if len(stack) == 2 {
 		closeSeg(pTypFileSegment)
 	}
+	root.Link(nil, -1)
 	return root
 }
 
