@@ -2,15 +2,37 @@ package pathern
 
 import (
 	_ "errors"
-	_ "fmt"
+	"fmt"
 	"strings"
 	"unicode"
 	_ "unicode"
 	"unicode/utf8"
 )
 
+type tkTyp int
+
+func (t tkTyp) String() string {
+	switch t {
+	case tkTypLiteral:
+		return "Literal"
+	case tkTypOpenGroup:
+		return "OpenGroup"
+	case tkTypCloseGroup:
+		return "CloseGroup"
+	case tkTypStar:
+		return "Star"
+	case tkTypStarStar:
+		return "StarStar"
+	case tkTypSeparator:
+		return "Separator"
+	case tkTypAlternation:
+		return "Alternation"
+	}
+	return fmt.Sprintf("tkTyp(%d)", t)
+}
+
 const (
-	tkTypLiteral = iota + 1
+	tkTypLiteral tkTyp = iota + 1
 	tkTypOpenGroup
 	tkTypCloseGroup
 	tkTypStar
@@ -20,7 +42,7 @@ const (
 )
 
 type token struct {
-	typ       int
+	typ       tkTyp
 	literal   string
 	caseSens  bool
 	groupName string
@@ -28,12 +50,43 @@ type token struct {
 	optional  bool
 }
 
+type pTyp int
+
+func (p pTyp) String() string {
+	switch p {
+	case pTypRoot:
+		return "Root"
+	case pTypDirSegment:
+		return "DirSegment"
+	case pTypFileSegment:
+		return "FileSegment"
+	case pTypExplicit:
+		return "Explicit"
+	case pTypNegatedA:
+		return "NegatedAhead"
+	case pTypNegatedB:
+		return "NegatedBehind"
+	case pTypAltOuter:
+		return "AltOuter"
+	case pTypAltInner:
+		return "AltInner"
+	case pTypLiteral:
+		return "Literal"
+	case pTypStar:
+		return "Star"
+	case pTypStarStar:
+		return "StarStar"
+	}
+	return fmt.Sprintf("pTyp(%d)", p)
+}
+
 const (
-	pTypeRoot = iota
+	pTypRoot pTyp = iota
 	pTypDirSegment
 	pTypFileSegment
 	pTypExplicit
-	pTypNegated
+	pTypNegatedA
+	pTypNegatedB
 	pTypAltOuter
 	pTypAltInner
 	pTypLiteral
@@ -51,12 +104,10 @@ func (n *baseNode) Position() (pNode, int) {
 }
 
 type pNode interface {
-	Typ() int
+	Typ() pTyp
 	Link(parent pNode, index int)
 	Child(index int) pNode
 	Position() (pNode, int)
-
-	matchSegmentStatic(iseg string, nameValues map[string]string) int
 }
 
 type matchSegState struct {
@@ -65,6 +116,7 @@ type matchSegState struct {
 	left        int
 	right       int
 	nextFwd     pNode
+	nextBwd     pNode
 	top         pNode
 	altStackFwd []int
 	altStackBwd []int
@@ -88,7 +140,7 @@ func (ms *matchSegState) nextNode(node pNode, step int, success bool) pNode {
 		for {
 			parent, index := node.Position()
 			if parent.Typ() == pTypAltOuter {
-				next := parent.Child(index + step)
+				next := parent.Child(index + abs(step)) //alternation is always left to right
 				if next != nil {
 					return next
 				}
@@ -108,7 +160,12 @@ func (ms *matchSegState) nextNode(node pNode, step int, success bool) pNode {
 	}
 	for {
 		parent, index := node.Position()
-		next := parent.Child(index + step)
+		var next pNode
+		if parent.Typ() == pTypAltOuter {
+			next = parent.Child(index + abs(step))
+		} else {
+			next = parent.Child(index + step)
+		}
 		if next != nil {
 			return next
 		}
@@ -129,7 +186,8 @@ func (ms *matchSegState) nextNode(node pNode, step int, success bool) pNode {
 
 func (ms *matchSegState) match() bool {
 	ms.remSeg = ms.iseg
-	ms.nextFwd = ms.top.(*groupNode).nodes[0]
+	topNodes := ms.top.(*groupNode).nodes
+	ms.nextFwd = topNodes[0]
 	for {
 		current := ms.nextFwd
 		m := ms.stepForward()
@@ -143,14 +201,41 @@ func (ms *matchSegState) match() bool {
 			if ms.left == len(ms.iseg) {
 				return true
 			}
-			if ms.top.Typ() == pTypNegated {
+			if ms.top.Typ() == pTypNegatedA {
 				return hasNextInSegment(ms.top, 1)
 			}
 			// standalone successful negation
 			return ms.left == 0
 		}
 	}
-
+	ms.remSeg = ms.iseg[ms.left:]
+	backLen := len(ms.remSeg)
+	ms.nextBwd = topNodes[len(topNodes)-1]
+	for {
+		current := ms.nextBwd
+		m := ms.stepBackward()
+		if m < 0 {
+			return false
+		}
+		if m == 0 {
+			break
+		}
+		if current == ms.nextBwd {
+			if ms.right == backLen {
+				return true
+			}
+			if ms.top.Typ() == pTypNegatedB {
+				return hasNextInSegment(ms.top, -1)
+			}
+			// standalone successful negation
+			return ms.right == 0
+		}
+	}
+	if ms.nextFwd == ms.nextBwd {
+		if _, ok := ms.nextFwd.(*starNode); ok {
+			return true
+		}
+	}
 	return false
 }
 
@@ -184,8 +269,9 @@ func (ms *matchSegState) stepForward() int {
 			ms.nextFwd = n.nodes[0]
 			return 1
 		}
-		if typ == pTypNegated {
+		if typ == pTypNegatedA {
 			nms := *ms
+			nms.iseg = nms.remSeg
 			nms.nextFwd = n.nodes[0]
 			nms.top = ms.nextFwd
 			nms.altStackFwd = nil
@@ -204,6 +290,9 @@ func (ms *matchSegState) stepForward() int {
 				return 1
 			}
 		}
+		if typ == pTypNegatedB {
+			panic("Not yet implemented")
+		}
 		if typ == pTypAltOuter {
 			ms.altStackFwd = append(ms.altStackFwd, ms.left)
 			ms.nextFwd = n.nodes[0]
@@ -218,7 +307,10 @@ func (ms *matchSegState) stepForward() int {
 		} else {
 			num = hasPrefixFold(ms.remSeg, n.text)
 		}
-		if num > 0 {
+		if num <= 0 && n.optional {
+			num = 0
+		}
+		if num >= 0 {
 			ms.left += num
 			ms.remSeg = ms.remSeg[num:]
 			next := ms.nextNode(ms.nextFwd, 1, true)
@@ -241,15 +333,88 @@ func (ms *matchSegState) stepForward() int {
 	return -1
 }
 
+func (ms *matchSegState) stepBackward() int {
+	typ := ms.nextBwd.Typ()
+	switch n := ms.nextBwd.(type) {
+	case *groupNode:
+		if typ == pTypAltInner {
+			ms.nextBwd = n.nodes[len(n.nodes)-1]
+			return 1
+		}
+		if typ == pTypExplicit {
+			ms.nextBwd = n.nodes[len(n.nodes)-1]
+			return 1
+		}
+		if typ == pTypNegatedA {
+			panic("Not yet implemented")
+		}
+		if typ == pTypNegatedB {
+			nms := *ms
+			nms.iseg = nms.remSeg
+			nms.nextBwd = n.nodes[len(n.nodes)-1]
+			nms.top = ms.nextBwd
+			nms.altStackFwd = nil
+			if nms.match() {
+				next := ms.nextNode(ms.nextBwd, -1, false)
+				if next == nil {
+					return -1
+				}
+				ms.nextBwd = next
+				return 1
+			} else {
+				next := ms.nextNode(ms.nextBwd, -1, true)
+				if next != nil {
+					ms.nextBwd = next
+				}
+				return 1
+			}
+		}
+		if typ == pTypAltOuter {
+			ms.altStackFwd = append(ms.altStackFwd, ms.right)
+			ms.nextBwd = n.nodes[0]
+			return 1
+		}
+	case *literalNode:
+		num := 0
+		if n.caseSensitive {
+			if strings.HasSuffix(ms.remSeg, n.text) {
+				num = len(n.text)
+			}
+		} else {
+			num = hasSuffixFold(ms.remSeg, n.text)
+		}
+		if num > 0 {
+			ms.right += num
+			ms.remSeg = ms.remSeg[:len(ms.remSeg)-num]
+			next := ms.nextNode(ms.nextBwd, -1, true)
+			if next != nil {
+				ms.nextBwd = next
+			}
+			return 1
+		}
+		next := ms.nextNode(ms.nextBwd, -1, false)
+		if next == nil {
+			return -1
+		}
+		ms.nextBwd = next
+		return 1
+	case *starNode:
+		return 0
+	case *starStarNode:
+		return 0
+	}
+	return -1
+}
+
 type groupNode struct {
 	baseNode
-	typ      int
+	typ      pTyp
 	name     string
 	optional bool
 	nodes    []pNode
 }
 
-func (n *groupNode) Typ() int {
+func (n *groupNode) Typ() pTyp {
 	return n.typ
 }
 
@@ -268,117 +433,76 @@ func (n *groupNode) Child(index int) pNode {
 	return nil
 }
 
-func (n *groupNode) Match2(path string) (map[string]string, bool) {
-	nameValues := make(map[string]string)
-	isegs := splitPath(path)
-	start := 0
+type matchPathState struct {
+	remSegs  []string
+	remNodes []pNode
+}
+
+func (mp *matchPathState) matchOneOnOne(dir int) int {
 	for {
-		if start == len(isegs) {
-			if start == len(n.nodes) {
-				return nameValues, true
+		if len(mp.remSegs) == 0 {
+			if len(mp.remNodes) == 0 {
+				return 1
 			}
-			// check if all remaining nodes can match nothing
-			return nil, false
+		} else if len(mp.remNodes) == 0 {
+			return -1
 		}
-		if start == len(n.nodes) {
-			return nil, false
+		ni := If(dir == 1, 0, len(mp.remNodes)-1)
+		node := mp.remNodes[ni].(*groupNode)
+		if node.nodes[0].Typ() == pTypStarStar {
+			return 0
 		}
-		ms := matchSegState{iseg: isegs[start], top: n.nodes[start]}
+		si := If(dir == 1, 0, len(mp.remSegs)-1)
+		if si < 0 {
+			return -1
+		}
+		ms := matchSegState{iseg: mp.remSegs[si], top: node}
 		m := ms.match()
 		if !m {
-			return nil, false
+			return -1
 		}
-		start++
+		if dir == 1 {
+			mp.remNodes = mp.remNodes[1:]
+			mp.remSegs = mp.remSegs[1:]
+		} else {
+			mp.remNodes = mp.remNodes[:ni]
+			mp.remSegs = mp.remSegs[:si]
+		}
 	}
-
-	return nil, false
 }
 
 func (n *groupNode) Match(path string) (map[string]string, bool) {
 	nameValues := make(map[string]string)
-	isegs := splitPath(path)
-	start := 0
-	for {
-		if start == len(isegs) {
-			if start == len(n.nodes) {
-				return nameValues, true
-			}
-			// check if all remaining nodes can match nothing
-			return nil, false
-		}
-		if start == len(n.nodes) {
-			return nil, false
-		}
-		m := n.nodes[start].matchSegmentStatic(isegs[start], nameValues)
-		if m < 0 {
-			return nil, false
-		}
-		if m == 0 {
-			break
-		}
-		start++
+	mp := matchPathState{remSegs: splitPath(path), remNodes: n.nodes}
+	f := mp.matchOneOnOne(1)
+	if f < 0 {
+		return nil, false
 	}
-
+	if f > 0 {
+		return nameValues, true
+	}
+	b := mp.matchOneOnOne(-1)
+	if b < 0 {
+		return nil, false
+	}
+	if b > 0 {
+		return nameValues, true
+	}
+	if len(mp.remNodes) == 1 {
+		return nameValues, true
+	}
 	return nil, false
-}
-
-func (n *groupNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
-	if len(n.nodes) == 1 {
-		m := n.nodes[0].matchSegmentStatic(iseg, nameValues)
-		if n.typ == pTypNegated {
-			m = -m
-		}
-		if m > 0 && len(n.name) > 0 {
-			nameValues[n.name] = iseg
-		}
-		return m
-	}
-	if n.typ == pTypAltOuter {
-		for _, an := range n.nodes {
-			m := an.matchSegmentStatic(iseg, nameValues)
-			if m >= 0 {
-				return m
-			}
-		}
-		return -1
-	}
-	// potNameValues := make(map[string]string)
-	// leftLen := 0
-	// remSeg := iseg
-	// for _, cn := range n.nodes {
-	// 	m := cn.matchSegmentStatic(remSeg, 1, potNameValues)
-	// 	cnTyp := cn.Typ()
-	// 	if (cnTyp == pTypNegated && m > 0) || (cnTyp != pTypNegated && m < 0) {
-	// 		return -1
-	// 	}
-	// 	if m == 0 {
-	// 		break
-	// 	}
-	// 	leftLen += m
-	// 	remSeg = iseg[leftLen:]
-	// }
-
-	switch n.typ {
-	case pTypDirSegment, pTypFileSegment:
-
-	case pTypExplicit:
-
-	case pTypNegated:
-
-	case pTypAltInner:
-	}
-	return -1
 }
 
 type literalNode struct {
 	baseNode
-	typ           int
+	typ           pTyp
 	text          string
 	optional      bool
 	caseSensitive bool
 }
 
-func (n *literalNode) Typ() int {
+func (n *literalNode) Typ() pTyp {
 	return n.typ
 }
 
@@ -391,38 +515,12 @@ func (n *literalNode) Child(index int) pNode {
 	return nil
 }
 
-func (n *literalNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
-	dir := 0
-	if n.caseSensitive {
-		if dir == 0 && iseg == n.text {
-			return len(iseg)
-		} else if dir > 0 && strings.HasPrefix(iseg, n.text) {
-			return len(n.text)
-		} else if dir < 0 && strings.HasSuffix(iseg, n.text) {
-			return len(n.text)
-		}
-	} else if dir == 0 {
-		if strings.EqualFold(iseg, n.text) {
-			return len(iseg)
-		}
-	} else if dir > 0 {
-		if n := hasPrefixFold(iseg, n.text); n > 0 {
-			return n
-		}
-	} else if dir < 0 {
-		if n := hasSuffixFold(iseg, n.text); n > 0 {
-			return n
-		}
-	}
-	return -1
-}
-
 type starNode struct {
 	baseNode
-	typ int
+	typ pTyp
 }
 
-func (n *starNode) Typ() int {
+func (n *starNode) Typ() pTyp {
 	return n.typ
 }
 
@@ -435,17 +533,13 @@ func (n *starNode) Child(index int) pNode {
 	return nil
 }
 
-func (n *starNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
-	return len(iseg)
-}
-
 type starStarNode struct {
 	baseNode
-	typ     int
+	typ     pTyp
 	negated *groupNode
 }
 
-func (n *starStarNode) Typ() int {
+func (n *starStarNode) Typ() pTyp {
 	return n.typ
 }
 
@@ -464,28 +558,29 @@ func (n *starStarNode) Child(index int) pNode {
 	return nil
 }
 
-func (n *starStarNode) matchSegmentStatic(iseg string, nameValues map[string]string) int {
-	return 0
-}
-
 type textPos struct {
-	cur  rune
-	next rune
+	cur      rune
+	next     rune
+	nextnext rune
 }
 
 func chars(text string, ch chan textPos) {
-	pr := rune(0)
+	pr1 := rune(0)
+	pr2 := rune(0)
 	for _, c := range text {
-		ch <- textPos{pr, c}
-		pr = c
+		ch <- textPos{pr1, pr2, c}
+		pr1 = pr2
+		pr2 = c
 	}
-	ch <- textPos{pr, 0}
+	ch <- textPos{pr1, pr2, 0}
+	ch <- textPos{pr2, 0, 0}
 	close(ch)
 }
 
 func lex(text string, tkns chan token) {
 	ch := make(chan textPos)
 	go chars(text, ch)
+	<-ch
 	<-ch
 	skippingInitSlash := true
 	caseSens := false
@@ -519,14 +614,21 @@ func lex(text string, tkns chan token) {
 		}
 		if groupNamePossible {
 			if p.cur == ':' {
-				tkns <- token{typ: tkTypOpenGroup, groupName: value}
-				value = ""
+				if p.next == '!' && p.nextnext == '>' {
+					tkns <- token{typ: tkTypOpenGroup}
+					receive = false
+				} else {
+					tkns <- token{typ: tkTypOpenGroup, groupName: value}
+					value = ""
+				}
 				groupNamePossible = false
 				continue
 			}
 			if p.cur == '"' {
+				tkns <- token{typ: tkTypOpenGroup}
 				caseSens = !caseSens
 				groupNamePossible = false
+				// We don't end any previous literal here. If case changes in the middle of a literal, we will end the literal when a character with the new case is encountered.
 				continue
 			}
 			if p.cur == '<' || p.cur == '>' || p.cur == '*' || p.cur == '?' || p.cur == '|' || p.cur == '/' || p.cur == '\\' {
@@ -536,10 +638,12 @@ func lex(text string, tkns chan token) {
 				continue
 			}
 			value += string(p.cur)
+			valueCaseSens = caseSens
 			continue
 		}
 		if p.cur == '"' {
 			caseSens = !caseSens
+			// Unless we are at the end, we don't end any previous literal here. If case changes in the middle of a literal, we will end the literal when a character with the new case is encountered.
 			if p.next == 0 {
 				sendLiteral()
 			}
@@ -560,6 +664,23 @@ func lex(text string, tkns chan token) {
 			}
 			groupNamePossible = true
 			continue
+		}
+		if p.cur == ':' {
+			sendLiteral()
+			if p.next == '!' {
+				p, ok = <-ch
+				if p.next == '>' {
+					p, ok = <-ch
+					if p.next == '?' {
+						p, ok = <-ch
+						tkns <- token{typ: tkTypCloseGroup, optional: true, negated: true}
+					} else {
+						tkns <- token{typ: tkTypCloseGroup, negated: true}
+					}
+				}
+				panic("expected >")
+			}
+			panic("!>")
 		}
 		if p.cur == '>' {
 			sendLiteral()
@@ -598,16 +719,16 @@ func lex(text string, tkns chan token) {
 			tkns <- token{typ: tkTypLiteral, literal: string(p.cur), caseSens: caseSens, optional: true}
 			p, ok = <-ch
 			value = ""
-		} else {
-			if len(value) > 0 && valueCaseSens != caseSens {
-				tkns <- token{typ: tkTypLiteral, literal: value, caseSens: valueCaseSens}
-				value = ""
-			}
-			value += string(p.cur)
-			valueCaseSens = caseSens
-			if p.next == 0 {
-				sendLiteral()
-			}
+			continue
+		}
+		if len(value) > 0 && valueCaseSens != caseSens {
+			tkns <- token{typ: tkTypLiteral, literal: value, caseSens: valueCaseSens}
+			value = ""
+		}
+		value += string(p.cur)
+		valueCaseSens = caseSens
+		if p.next == 0 {
+			sendLiteral()
 		}
 	}
 	close(tkns)
@@ -622,7 +743,7 @@ func New(text string) *groupNode {
 	tkns := make(chan token)
 	go lex(text, tkns)
 
-	root := &groupNode{typ: pTypeRoot}
+	root := &groupNode{typ: pTypRoot}
 	stack := make([]*parsingState, 0, 2)
 	ps := &parsingState{}
 	ps.current = root
@@ -641,7 +762,7 @@ func New(text string) *groupNode {
 			ps = stack[len(stack)-1]
 		}
 	}
-	closeSeg := func(typ int) {
+	closeSeg := func(typ pTyp) {
 		closeAlt()
 		prevSeg := &groupNode{typ: typ}
 		prevSeg.nodes = append(prevSeg.nodes, ps.list...)
@@ -658,7 +779,7 @@ func New(text string) *groupNode {
 			ps.current = &literalNode{typ: pTypLiteral, text: token.literal, optional: token.optional, caseSensitive: token.caseSens}
 		case tkTypOpenGroup:
 			if token.negated {
-				ps.current = &groupNode{typ: pTypNegated, name: token.groupName}
+				ps.current = &groupNode{typ: pTypNegatedA}
 			} else {
 				ps.current = &groupNode{typ: pTypExplicit, name: token.groupName}
 			}
@@ -670,17 +791,23 @@ func New(text string) *groupNode {
 			ps = stack[len(stack)-1]
 			g := ps.current.(*groupNode)
 			g.optional = token.optional
+			if token.negated {
+				if g.typ == pTypNegatedA {
+					panic("negated group can be look-ahead or look-behind but not both")
+				}
+				g.typ = pTypNegatedB
+			}
 			g.nodes = append(g.nodes, ns.list...)
 			ns = nil
 		case tkTypStar:
 			ps.current = &starNode{typ: pTypStar}
 		case tkTypStarStar:
 			ss := &starStarNode{typ: pTypStarStar}
-			if len(ps.list) == 1 && ps.list[0].Typ() == pTypNegated {
+			if len(ps.list) == 1 && (ps.list[0].Typ() == pTypNegatedA || ps.list[0].Typ() == pTypNegatedB) {
 				ss.negated = ps.list[0].(*groupNode)
 				ps.list = nil
 			} else if len(ps.list) != 0 {
-				// error
+				panic("only a single negated group can be before a **")
 			}
 			ps.current = ss
 		case tkTypAlternation:
@@ -936,4 +1063,18 @@ hasUnicode:
 		}
 		return -1
 	}
+}
+
+func abs(i int) int {
+	if i < 0 {
+		return -i
+	}
+	return i
+}
+
+func If[T any](condition bool, whenTrue T, whenFalse T) T {
+	if condition {
+		return whenTrue
+	}
+	return whenFalse
 }

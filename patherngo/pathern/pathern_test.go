@@ -6,7 +6,7 @@ import (
 )
 
 func assertMatch(t *testing.T, p *groupNode, pattern string, path string, nameValues map[string]string) {
-	vs, ok := p.Match2(path)
+	vs, ok := p.Match(path)
 	if !ok {
 		t.Fatalf("Expected path %v to match pattern %v", path, pattern)
 	}
@@ -59,6 +59,12 @@ func TestLexCaseSensName1(t *testing.T) {
 func TestLexCaseSensName2(t *testing.T) {
 	testLex(t, `"abc"def`, []token{{typ: tkTypLiteral, literal: "abc", caseSens: true}, {typ: tkTypLiteral, literal: "def"}})
 }
+func TestLexCaseSensName3(t *testing.T) {
+	testLex(t, `abc"def"`, []token{{typ: tkTypLiteral, literal: "abc"}, {typ: tkTypLiteral, literal: "def", caseSens: true}})
+}
+func TestLexCaseSensName4(t *testing.T) {
+	testLex(t, `<abc"def"ghi>`, []token{{typ: tkTypOpenGroup}, {typ: tkTypLiteral, literal: "abc"}, {typ: tkTypLiteral, literal: "def", caseSens: true}, {typ: tkTypLiteral, literal: "ghi"}, {typ: tkTypCloseGroup}})
+}
 
 func TestLexNamedGroup1(t *testing.T) {
 	testLex(t, `<abc:def>`, []token{{typ: tkTypOpenGroup, groupName: "abc"}, {typ: tkTypLiteral, literal: "def"}, {typ: tkTypCloseGroup}})
@@ -72,7 +78,7 @@ func TestLexAsterisk(t *testing.T) {
 	testLex(t, `*`, []token{{typ: tkTypStar}})
 }
 
-func TestLexDoubleAsterisk(t *testing.T) {
+func TestLexDoubleStar(t *testing.T) {
 	testLex(t, `**`, []token{{typ: tkTypStarStar}})
 }
 
@@ -201,7 +207,7 @@ func TestSplitPath19(t *testing.T) {
 	assertEqual(t, []string{`ab`, `cd`}, ss)
 }
 
-func TestMatchSimple1(t *testing.T) {
+func TestMatchLiteral1(t *testing.T) {
 	ptn := `abc`
 	p := New(ptn)
 	assertMatch(t, p, ptn, `abc`, map[string]string{})
@@ -209,7 +215,7 @@ func TestMatchSimple1(t *testing.T) {
 	assertNoMatch(t, p, ptn, `abcd`)
 }
 
-func TestMatchSimple2(t *testing.T) {
+func TestMatchLiteral2(t *testing.T) {
 	ptn := `abc/def`
 	p := New(ptn)
 	assertMatch(t, p, ptn, `abc/def`, map[string]string{})
@@ -217,7 +223,7 @@ func TestMatchSimple2(t *testing.T) {
 	assertNoMatch(t, p, ptn, `abc/def/ghi`)
 }
 
-func TestMatchSimple3(t *testing.T) {
+func TestMatchStar1(t *testing.T) {
 	ptn := `*/def`
 	p := New(ptn)
 	assertMatch(t, p, ptn, `abc/def`, map[string]string{})
@@ -225,12 +231,22 @@ func TestMatchSimple3(t *testing.T) {
 	assertNoMatch(t, p, ptn, `abc/def/ghi`)
 }
 
-func TestMatchSimple4(t *testing.T) {
+func TestMatchStar2(t *testing.T) {
 	ptn := `*/*`
 	p := New(ptn)
 	assertMatch(t, p, ptn, `abc/def`, map[string]string{})
 	assertNoMatch(t, p, ptn, `abc`)
 	assertNoMatch(t, p, ptn, `abc/def/ghi`)
+}
+
+func TestMatchPrefix(t *testing.T) {
+	ptn := `abc*`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `abc`, map[string]string{})
+	assertMatch(t, p, ptn, `abcd`, map[string]string{})
+	assertNoMatch(t, p, ptn, `abc/def`)
+	assertNoMatch(t, p, ptn, `babc`)
+	assertNoMatch(t, p, ptn, `babcd`)
 }
 
 func TestMatchAlternation1(t *testing.T) {
@@ -244,6 +260,21 @@ func TestMatchAlternation1(t *testing.T) {
 	assertNoMatch(t, p, ptn, `abcdef/xyz`)
 }
 
+func TestMatchAlternation2(t *testing.T) {
+	ptn := `<abc|def><pq|r>`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `abcpq`, map[string]string{})
+	assertMatch(t, p, ptn, `abcr`, map[string]string{})
+	assertMatch(t, p, ptn, `defpq`, map[string]string{})
+	assertMatch(t, p, ptn, `defr`, map[string]string{})
+	assertNoMatch(t, p, ptn, `abc`)
+	assertNoMatch(t, p, ptn, `def`)
+	assertNoMatch(t, p, ptn, `pq`)
+	assertNoMatch(t, p, ptn, `r`)
+	assertNoMatch(t, p, ptn, `abcdefpqr`)
+	assertNoMatch(t, p, ptn, `defrpq`)
+}
+
 func TestMatchNegation1(t *testing.T) {
 	ptn := `<!:abc>/xyz`
 	p := New(ptn)
@@ -252,4 +283,42 @@ func TestMatchNegation1(t *testing.T) {
 	assertNoMatch(t, p, ptn, `abc/xyz`)
 	assertNoMatch(t, p, ptn, `abc`)
 	assertNoMatch(t, p, ptn, `xyz`)
+}
+
+func TestMatchOptionalChar1(t *testing.T) {
+	ptn := `abc.xlsx?`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `abc.xls`, map[string]string{})
+	assertMatch(t, p, ptn, `abc.xlsx`, map[string]string{})
+	assertNoMatch(t, p, ptn, `abc.xl`)
+	assertNoMatch(t, p, ptn, `abc.xlsxy`)
+	assertNoMatch(t, p, ptn, `abc.xlsy`)
+}
+
+func TestMatchOptionalGroup(t *testing.T) {
+	ptn := `abc<xyz>?.xls`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `abc.xls`, map[string]string{})
+	assertMatch(t, p, ptn, `abcxyz.xls`, map[string]string{})
+	assertNoMatch(t, p, ptn, `abcxy.xls`)
+	assertNoMatch(t, p, ptn, `abcxyzz.xls`)
+}
+
+func TestMatchRecursive1(t *testing.T) {
+	ptn := `**/*.js`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `abc.js`, map[string]string{})
+	assertMatch(t, p, ptn, `xyz/abc.js`, map[string]string{})
+	assertMatch(t, p, ptn, `pqr/xyz/abc.js`, map[string]string{})
+}
+
+func TestMatchRecursive2(t *testing.T) {
+	ptn := `td/**/*`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `td/abc`, map[string]string{})
+	assertMatch(t, p, ptn, `td/abc.td`, map[string]string{})
+	assertMatch(t, p, ptn, `td/xyz/abc`, map[string]string{})
+	assertMatch(t, p, ptn, `td/xyz/pqr/abc`, map[string]string{})
+	assertNoMatch(t, p, ptn, `td`)
+	assertNoMatch(t, p, ptn, `xyz/td`)
 }
