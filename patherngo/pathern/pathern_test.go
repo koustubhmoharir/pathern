@@ -322,3 +322,9 @@ func TestMatchRecursive2(t *testing.T) {
 	assertNoMatch(t, p, ptn, `td`)
 	assertNoMatch(t, p, ptn, `xyz/td`)
 }
+
+func TestMatchNamedGroup(t *testing.T) {
+	ptn := `s/<app:*>/**/`
+	p := New(ptn)
+	assertMatch(t, p, ptn, `s/sitetech/td/format`, map[string]string{"app": "sitetech"})
+}

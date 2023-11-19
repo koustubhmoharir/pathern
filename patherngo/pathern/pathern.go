@@ -112,6 +112,7 @@ type pNode interface {
 	Link(parent pNode, index int)
 	Child(index int) pNode
 	Position() (pNode, int)
+	extract(valuesByNode map[pNode]string, values map[string]string, key string)
 }
 
 type matchSegState struct {
@@ -124,6 +125,7 @@ type matchSegState struct {
 	top         pNode
 	altStackFwd []int
 	altStackBwd []int
+	values      map[pNode]string
 }
 
 func (ms *matchSegState) nextNode(node pNode, step int, success bool) pNode {
@@ -237,10 +239,17 @@ func (ms *matchSegState) match() bool {
 	}
 	if ms.nextFwd == ms.nextBwd {
 		if _, ok := ms.nextFwd.(*starNode); ok {
+			if ms.values != nil {
+				ms.values[ms.nextFwd] = ms.remSeg
+			}
 			return true
 		}
 	}
 	return false
+}
+
+func (ms *matchSegState) extract(values map[string]string) {
+	ms.top.extract(ms.values, values, "")
 }
 
 func hasNextInSegment(n pNode, step int) bool {
@@ -279,6 +288,7 @@ func (ms *matchSegState) stepForward() int {
 			nms.nextFwd = n.nodes[0]
 			nms.top = ms.nextFwd
 			nms.altStackFwd = nil
+			nms.values = nil
 			if nms.match() {
 				next := ms.nextNode(ms.nextFwd, 1, false)
 				if next == nil {
@@ -316,6 +326,9 @@ func (ms *matchSegState) stepForward() int {
 		}
 		if num >= 0 {
 			ms.left += num
+			if ms.values != nil {
+				ms.values[n] = ms.remSeg[:num]
+			}
 			ms.remSeg = ms.remSeg[num:]
 			next := ms.nextNode(ms.nextFwd, 1, true)
 			if next != nil {
@@ -389,6 +402,9 @@ func (ms *matchSegState) stepBackward() int {
 		}
 		if num > 0 {
 			ms.right += num
+			if ms.values != nil {
+				ms.values[n] = ms.remSeg[len(ms.remSeg)-num:]
+			}
 			ms.remSeg = ms.remSeg[:len(ms.remSeg)-num]
 			next := ms.nextNode(ms.nextBwd, -1, true)
 			if next != nil {
@@ -437,9 +453,26 @@ func (n *groupNode) Child(index int) pNode {
 	return nil
 }
 
+func (n *groupNode) extract(valuesByNode map[pNode]string, values map[string]string, key string) {
+	if n.name == "" {
+		for _, cn := range n.nodes {
+			cn.extract(valuesByNode, values, key)
+		}
+	} else {
+		for _, cn := range n.nodes {
+			cn.extract(valuesByNode, values, n.name)
+		}
+		if key != "" {
+			v, _ := values[n.name]
+			values[key] += v
+		}
+	}
+}
+
 type matchPathState struct {
 	remSegs  []string
 	remNodes []pNode
+	values   map[string]string
 }
 
 func (mp *matchPathState) matchOneOnOne(dir int) int {
@@ -460,11 +493,12 @@ func (mp *matchPathState) matchOneOnOne(dir int) int {
 			return -1
 		}
 		si := If(dir == 1, 0, len(mp.remSegs)-1)
-		ms := matchSegState{iseg: mp.remSegs[si], top: node}
+		ms := matchSegState{iseg: mp.remSegs[si], top: node, values: make(map[pNode]string)}
 		m := ms.match()
 		if !m {
 			return -1
 		}
+		ms.extract(mp.values)
 		if dir == 1 {
 			mp.remNodes = mp.remNodes[1:]
 			mp.remSegs = mp.remSegs[1:]
@@ -477,7 +511,7 @@ func (mp *matchPathState) matchOneOnOne(dir int) int {
 
 func (n *groupNode) Match(path string) (map[string]string, bool) {
 	nameValues := make(map[string]string)
-	mp := matchPathState{remSegs: splitPath(path), remNodes: n.nodes}
+	mp := matchPathState{remSegs: splitPath(path), remNodes: n.nodes, values: nameValues}
 	f := mp.matchOneOnOne(1)
 	if f < 0 {
 		return nil, false
@@ -519,6 +553,13 @@ func (n *literalNode) Child(index int) pNode {
 	return nil
 }
 
+func (n *literalNode) extract(valuesByNode map[pNode]string, values map[string]string, key string) {
+	if key != "" {
+		v, _ := valuesByNode[n]
+		values[key] += v
+	}
+}
+
 type starNode struct {
 	baseNode
 	typ pTyp
@@ -535,6 +576,13 @@ func (n *starNode) Link(parent pNode, index int) {
 
 func (n *starNode) Child(index int) pNode {
 	return nil
+}
+
+func (n *starNode) extract(valuesByNode map[pNode]string, values map[string]string, key string) {
+	if key != "" {
+		v, _ := valuesByNode[n]
+		values[key] += v
+	}
 }
 
 type starStarNode struct {
@@ -560,6 +608,9 @@ func (n *starStarNode) Child(index int) pNode {
 		return n.negated
 	}
 	return nil
+}
+
+func (n *starStarNode) extract(valuesByNode map[pNode]string, values map[string]string, key string) {
 }
 
 type textPos struct {
@@ -768,12 +819,14 @@ func New(text string) PathPattern {
 	}
 	closeSeg := func(typ pTyp) {
 		closeAlt()
-		prevSeg := &groupNode{typ: typ}
-		prevSeg.nodes = append(prevSeg.nodes, ps.list...)
+		if len(ps.list) > 0 {
+			prevSeg := &groupNode{typ: typ}
+			prevSeg.nodes = append(prevSeg.nodes, ps.list...)
+			segParent := stack[len(stack)-2].current.(*groupNode)
+			segParent.nodes = append(segParent.nodes, prevSeg)
+		}
 		ps.current = nil
 		ps.list = nil
-		segParent := stack[len(stack)-2].current.(*groupNode)
-		segParent.nodes = append(segParent.nodes, prevSeg)
 	}
 
 	for token := range tkns {
