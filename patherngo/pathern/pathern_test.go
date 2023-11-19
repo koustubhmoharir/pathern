@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func assertMatch(t *testing.T, p *groupNode, pattern string, path string, nameValues map[string]string) {
+func assertMatch(t *testing.T, p PathPattern, pattern string, path string, nameValues map[string]string) {
 	vs, ok := p.Match(path)
 	if !ok {
 		t.Fatalf("Expected path %v to match pattern %v", path, pattern)
@@ -16,7 +16,7 @@ func assertMatch(t *testing.T, p *groupNode, pattern string, path string, nameVa
 	// }
 }
 
-func assertNoMatch(t *testing.T, p *groupNode, pattern string, path string) {
+func assertNoMatch(t *testing.T, p PathPattern, pattern string, path string) {
 	vs, ok := p.Match(path)
 	if ok {
 		t.Fatalf("Expected path %v to not match pattern %v", path, pattern)

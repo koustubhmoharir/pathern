@@ -9,6 +9,10 @@ import (
 	"unicode/utf8"
 )
 
+type PathPattern interface {
+	Match(path string) (map[string]string, bool)
+}
+
 type tkTyp int
 
 func (t tkTyp) String() string {
@@ -452,10 +456,10 @@ func (mp *matchPathState) matchOneOnOne(dir int) int {
 		if node.nodes[0].Typ() == pTypStarStar {
 			return 0
 		}
-		si := If(dir == 1, 0, len(mp.remSegs)-1)
-		if si < 0 {
+		if len(mp.remSegs) == 0 {
 			return -1
 		}
+		si := If(dir == 1, 0, len(mp.remSegs)-1)
 		ms := matchSegState{iseg: mp.remSegs[si], top: node}
 		m := ms.match()
 		if !m {
@@ -739,7 +743,7 @@ type parsingState struct {
 	current pNode
 }
 
-func New(text string) *groupNode {
+func New(text string) PathPattern {
 	tkns := make(chan token)
 	go lex(text, tkns)
 
