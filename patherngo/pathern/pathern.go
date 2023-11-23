@@ -13,6 +13,38 @@ type PathPattern interface {
 	Match(path string) (map[string]string, bool)
 }
 
+func Replace(replacePattern string, values map[string]string) (string, bool) {
+	result := ""
+	pi := 0
+	len := len(replacePattern)
+	missing := false
+	for i := 0; i < len; i++ {
+		c := replacePattern[i]
+		if c == '<' {
+			if i > pi {
+				result += replacePattern[pi:i]
+			}
+			pi = i + 1
+		} else if c == '>' {
+			if i > pi {
+				name := replacePattern[pi:i]
+				val, ok := values[name]
+				if ok {
+					result += val
+				} else {
+					missing = true
+					result += ("<" + name + ">")
+				}
+			}
+			pi = i + 1
+		}
+	}
+	if pi < len {
+		result += replacePattern[pi:]
+	}
+	return result, !missing
+}
+
 type tkTyp int
 
 func (t tkTyp) String() string {

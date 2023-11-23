@@ -32,6 +32,14 @@ func assertEqual[V any](t *testing.T, expected V, actual V) {
 	}
 }
 
+func assertReplace(t *testing.T, pattern string, values map[string]string, expected string) {
+	actual, ok := Replace(pattern, values)
+	if !ok {
+		t.Fatalf("Expected Replace to return true for pattern %v", pattern)
+	}
+	assertEqual(t, expected, actual)
+}
+
 func testLex(t *testing.T, pattern string, expected []token) {
 	ch := make(chan token)
 	go lex(pattern, ch)
@@ -327,4 +335,24 @@ func TestMatchNamedGroup(t *testing.T) {
 	ptn := `s/<app:*>/**/`
 	p := New(ptn)
 	assertMatch(t, p, ptn, `s/sitetech/td/format`, map[string]string{"app": "sitetech"})
+}
+
+func TestReplace1(t *testing.T) {
+	assertReplace(t, "a<x>d", map[string]string{"x": "bc"}, "abcd")
+	assertReplace(t, "a<xy>d", map[string]string{"xy": "bc"}, "abcd")
+}
+
+func TestReplace2(t *testing.T) {
+	assertReplace(t, "<x>ad", map[string]string{"x": "bc"}, "bcad")
+	assertReplace(t, "<xy>ad", map[string]string{"xy": "bc"}, "bcad")
+}
+
+func TestReplace3(t *testing.T) {
+	assertReplace(t, "<x>", map[string]string{"x": "bc"}, "bc")
+	assertReplace(t, "<xy>", map[string]string{"xy": "bc"}, "bc")
+}
+
+func TestReplace4(t *testing.T) {
+	assertReplace(t, "a<x>d<y>e", map[string]string{"x": "bc", "y": "fg"}, "abcdfge")
+	assertReplace(t, "a<x><y>e", map[string]string{"x": "bc", "y": "fg"}, "abcfge")
 }
